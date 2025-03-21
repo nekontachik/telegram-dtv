@@ -13,6 +13,92 @@ import { logger } from '../utils/logger.js';
 import { RedisStorage } from '../storage/RedisStorage.js';
 import { MemoryStorage } from '../storage/MemoryStorage.js';
 
+// Circuit breaker for external services
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.failureThreshold = options.failureThreshold || 5;
+    this.resetTimeout = options.resetTimeout || 60000;
+    this.failures = 0;
+    this.lastFailureTime = null;
+    this.state = 'CLOSED';
+  }
+
+  async execute(operation) {
+    if (this.isOpen()) {
+      throw new Error('Circuit breaker is OPEN');
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  isOpen() {
+    if (this.state === 'OPEN') {
+      const now = Date.now();
+      if (now - this.lastFailureTime >= this.resetTimeout) {
+        this.state = 'HALF-OPEN';
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  onSuccess() {
+    this.failures = 0;
+    this.state = 'CLOSED';
+  }
+
+  onFailure() {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    if (this.failures >= this.failureThreshold) {
+      this.state = 'OPEN';
+    }
+  }
+}
+
+// Rate limiter for webhook endpoint
+class RateLimiter {
+  constructor(options = {}) {
+    this.windowMs = options.windowMs || 60000;
+    this.maxRequests = options.maxRequests || 100;
+    this.requests = new Map();
+  }
+
+  isRateLimited(ip) {
+    const now = Date.now();
+    const userRequests = this.requests.get(ip) || [];
+    const recentRequests = userRequests.filter(time => now - time < this.windowMs);
+    
+    if (recentRequests.length >= this.maxRequests) {
+      return true;
+    }
+
+    recentRequests.push(now);
+    this.requests.set(ip, recentRequests);
+    return false;
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [ip, times] of this.requests.entries()) {
+      const recentRequests = times.filter(time => now - time < this.windowMs);
+      if (recentRequests.length === 0) {
+        this.requests.delete(ip);
+      } else {
+        this.requests.set(ip, recentRequests);
+      }
+    }
+  }
+}
+
 class ProductionServer {
   constructor() {
     this.server = null;
@@ -23,6 +109,68 @@ class ProductionServer {
     this.isShuttingDown = false;
     this.startTime = Date.now();
     this.initTimeout = null;
+    
+    // Initialize circuit breakers
+    this.openaiCircuitBreaker = new CircuitBreaker({
+      failureThreshold: 3,
+      resetTimeout: 30000
+    });
+    
+    this.redisCircuitBreaker = new CircuitBreaker({
+      failureThreshold: 5,
+      resetTimeout: 15000
+    });
+    
+    this.dbCircuitBreaker = new CircuitBreaker({
+      failureThreshold: 3,
+      resetTimeout: 20000
+    });
+    
+    // Initialize rate limiter
+    this.rateLimiter = new RateLimiter({
+      windowMs: 60000,
+      maxRequests: 100
+    });
+    
+    // Start rate limiter cleanup
+    setInterval(() => this.rateLimiter.cleanup(), 60000);
+    
+    // Service health checks
+    this.startHealthChecks();
+  }
+
+  startHealthChecks() {
+    const interval = 30000; // 30 seconds
+    
+    setInterval(async () => {
+      if (this.isShuttingDown) return;
+      
+      try {
+        // Check Redis connection
+        if (this.storage?.ping) {
+          await this.redisCircuitBreaker.execute(() => this.storage.ping());
+        }
+        
+        // Check database connection
+        if (config.supabase.enabled && dbService.isInitialized()) {
+          await this.dbCircuitBreaker.execute(() => dbService.ping());
+        }
+        
+        // Check OpenAI connection
+        await this.openaiCircuitBreaker.execute(() => openaiService.validateApiKey());
+        
+        // Check bot webhook
+        if (this.botService?.getBot()) {
+          const webhookInfo = await this.botService.getBot().getWebHookInfo();
+          if (!webhookInfo.url || webhookInfo.url !== config.telegram.webhookUrl) {
+            logger.warn('Webhook URL mismatch, attempting to reset');
+            await this.botService.setupWebhook(config.telegram.webhookUrl);
+          }
+        }
+      } catch (error) {
+        logger.error('Health check failed:', error);
+      }
+    }, interval);
   }
 
   async init() {
@@ -89,41 +237,34 @@ class ProductionServer {
       // Validate configuration
       config.validate();
       
-      // Initialize storage with connection check
+      // Initialize storage with circuit breaker
       this.storage = config.redis 
         ? new RedisStorage(config.redis)
         : new MemoryStorage();
       
       if (config.redis) {
-        await this.storage.ping();
+        await this.redisCircuitBreaker.execute(() => this.storage.ping());
       }
       
-      // Initialize database if configured
+      // Initialize database with circuit breaker
       if (config.supabase.enabled) {
-        await dbService.init(config.supabase.url, config.supabase.key);
-        if (!dbService.isInitialized()) {
-          throw new Error('Failed to initialize database');
-        }
-        await dbService.ping();
+        await this.dbCircuitBreaker.execute(async () => {
+          await dbService.init(config.supabase.url, config.supabase.key);
+          if (!dbService.isInitialized()) {
+            throw new Error('Failed to initialize database');
+          }
+          await dbService.ping();
+        });
       }
       
-      // Initialize OpenAI with retries
-      let openAiRetries = 3;
-      while (openAiRetries > 0) {
-        try {
-          const isValidKey = await openaiService.validateApiKey();
-          if (!isValidKey) {
-            throw new Error("Invalid OpenAI API key");
-          }
-          await openaiService.createOrGetAssistant();
-          break;
-        } catch (error) {
-          openAiRetries--;
-          if (openAiRetries === 0) throw error;
-          logger.warn(`OpenAI initialization failed, retrying... (${openAiRetries} attempts left)`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
+      // Initialize OpenAI with circuit breaker
+      await this.openaiCircuitBreaker.execute(async () => {
+        const isValidKey = await openaiService.validateApiKey();
+        if (!isValidKey) {
+          throw new Error("Invalid OpenAI API key");
         }
-      }
+        await openaiService.createOrGetAssistant();
+      });
 
       // Initialize user session service
       this.userSessionService = new UserSessionService(this.storage);
@@ -158,13 +299,18 @@ class ProductionServer {
   }
 
   setupRoutes() {
-    // Health check route with detailed status
+    // Health check route with circuit breaker states
     this.server.registerRoute('get', '/health', (req, res) => {
       const uptime = Math.floor((Date.now() - this.startTime) / 1000);
       res.json({ 
         status: this.isShuttingDown ? 'shutting_down' : 'ok',
         uptime,
         ...this.server.getStatus(),
+        circuitBreakers: {
+          openai: this.openaiCircuitBreaker.state,
+          redis: this.redisCircuitBreaker.state,
+          database: this.dbCircuitBreaker.state
+        },
         storage: {
           type: config.redis ? 'redis' : 'memory',
           status: this.storage?.isConnected() ? 'connected' : 'disconnected'
@@ -187,13 +333,20 @@ class ProductionServer {
       });
     });
 
-    // Webhook route with validation
+    // Webhook route with rate limiting and circuit breakers
     this.server.registerRoute('post', '/webhook', async (req, res) => {
       if (this.isShuttingDown) {
         return res.status(503).json({ error: 'Service is shutting down' });
       }
 
-      // Validate webhook secret if configured
+      // Rate limiting
+      const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      if (this.rateLimiter.isRateLimited(clientIp)) {
+        logger.warn(`Rate limit exceeded for IP: ${clientIp}`);
+        return res.status(429).json({ error: 'Too many requests' });
+      }
+
+      // Webhook secret validation
       const secret = req.headers['x-telegram-bot-api-secret-token'];
       if (config.telegram.webhookSecret && secret !== config.telegram.webhookSecret) {
         logger.warn('Invalid webhook secret received');
@@ -201,10 +354,18 @@ class ProductionServer {
       }
 
       try {
-        await this.webhookController.handleUpdate(req, res);
+        // Handle update with circuit breakers
+        await this.openaiCircuitBreaker.execute(async () => {
+          await this.webhookController.handleUpdate(req, res);
+        });
       } catch (error) {
-        logger.error('Webhook handler error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        if (error.message === 'Circuit breaker is OPEN') {
+          logger.error('OpenAI circuit breaker is open, service degraded');
+          res.status(503).json({ error: 'Service temporarily unavailable' });
+        } else {
+          logger.error('Webhook handler error:', error);
+          res.status(500).json({ error: 'Internal server error' });
+        }
       }
     });
   }
@@ -254,9 +415,17 @@ class ProductionServer {
   }
 }
 
-// Start server
+// Start server with error recovery
 const server = new ProductionServer();
-server.init().catch(error => {
+server.init().catch(async error => {
   logger.error('Server startup failed:', error);
+  
+  // Try to cleanup any partially initialized services
+  try {
+    await server.shutdown();
+  } catch (shutdownError) {
+    logger.error('Cleanup after failed startup failed:', shutdownError);
+  }
+  
   process.exit(1);
 }); 

@@ -1,9 +1,32 @@
 /**
- * Redis storage adapter using ioredis
+ * Redis storage adapter using ioredis with connection pooling
  */
 
 import Redis from 'ioredis';
 import { logger } from '../utils/logger.js';
+
+// Exponential backoff utility
+class ExponentialBackoff {
+  constructor(options = {}) {
+    this.initialDelay = options.initialDelay || 1000;
+    this.maxDelay = options.maxDelay || 30000;
+    this.factor = options.factor || 2;
+    this.jitter = options.jitter !== undefined ? options.jitter : true;
+  }
+
+  getDelay(attempt) {
+    let delay = Math.min(
+      this.initialDelay * Math.pow(this.factor, attempt),
+      this.maxDelay
+    );
+
+    if (this.jitter) {
+      delay = delay * (0.5 + Math.random());
+    }
+
+    return delay;
+  }
+}
 
 export class RedisStorage {
   constructor(config) {
@@ -11,211 +34,282 @@ export class RedisStorage {
       throw new Error('Redis URL is required');
     }
 
+    this.config = {
+      ...config,
+      maxPoolSize: config.maxPoolSize || 10,
+      minPoolSize: config.minPoolSize || 2
+    };
+
     this.isConnected = false;
     this.connectionError = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = config.maxReconnectAttempts || 10;
+    
+    // Connection pool
+    this.pool = new Map();
+    this.availableConnections = [];
+    
+    // Backoff strategy
+    this.backoff = new ExponentialBackoff({
+      initialDelay: 1000,
+      maxDelay: 30000,
+      factor: 2
+    });
 
-    this.redis = new Redis(config.url, {
-      maxRetriesPerRequest: config.maxRetries || 3,
+    // Initialize minimum pool size
+    this.initializePool();
+  }
+
+  async initializePool() {
+    try {
+      for (let i = 0; i < this.config.minPoolSize; i++) {
+        await this.addConnectionToPool();
+      }
+    } catch (error) {
+      logger.error('Failed to initialize Redis pool:', error);
+      throw error;
+    }
+  }
+
+  async addConnectionToPool() {
+    const connection = new Redis(this.config.url, {
+      maxRetriesPerRequest: this.config.maxRetries || 3,
       retryStrategy: (times) => {
         if (times > this.maxReconnectAttempts) {
           logger.error('Max Redis reconnection attempts reached');
-          return null; // Stop retrying
+          return null;
         }
-        const delay = Math.min(times * (config.retryDelay || 1000), 5000);
+        const delay = this.backoff.getDelay(times);
         logger.info(`Redis retry attempt ${times}, delay: ${delay}ms`);
         return delay;
       },
       connectTimeout: 5000,
-      lazyConnect: true // Don't connect immediately
+      lazyConnect: true
     });
 
-    this.setupEventHandlers();
+    const id = Date.now().toString() + Math.random().toString(36).substr(2);
+    
+    this.setupConnectionEventHandlers(connection, id);
+    await connection.connect();
+    
+    this.pool.set(id, connection);
+    this.availableConnections.push(id);
+    
+    return id;
   }
 
-  setupEventHandlers() {
-    this.redis.on('connect', () => {
+  setupConnectionEventHandlers(connection, id) {
+    connection.on('connect', () => {
       this.isConnected = true;
       this.connectionError = null;
       this.reconnectAttempts = 0;
-      logger.info('Redis connected');
+      logger.info(`Redis connection ${id} established`);
     });
 
-    this.redis.on('error', (error) => {
+    connection.on('error', (error) => {
       this.connectionError = error;
-      logger.error('Redis error:', error);
+      logger.error(`Redis connection ${id} error:`, error);
     });
 
-    this.redis.on('close', () => {
-      this.isConnected = false;
-      logger.warn('Redis connection closed');
+    connection.on('close', () => {
+      this.removeConnectionFromPool(id);
+      logger.warn(`Redis connection ${id} closed`);
     });
 
-    this.redis.on('reconnecting', (timeBeforeReconnect) => {
-      this.reconnectAttempts++;
-      logger.info(`Redis reconnecting in ${timeBeforeReconnect}ms (attempt ${this.reconnectAttempts})`);
-    });
-
-    this.redis.on('end', () => {
-      this.isConnected = false;
-      logger.info('Redis connection ended');
+    connection.on('end', () => {
+      this.removeConnectionFromPool(id);
+      logger.info(`Redis connection ${id} ended`);
     });
   }
 
-  /**
-   * Connect to Redis if not already connected
-   */
-  async connect() {
-    if (this.isConnected) return;
-
-    try {
-      await this.redis.connect();
-      await this.ping();
-    } catch (error) {
-      logger.error('Redis connection failed:', error);
-      throw error;
+  async getConnection() {
+    // Check if we need to add more connections
+    if (this.availableConnections.length === 0 && this.pool.size < this.config.maxPoolSize) {
+      const id = await this.addConnectionToPool();
+      return this.pool.get(id);
     }
+
+    // Get an available connection
+    while (this.availableConnections.length > 0) {
+      const id = this.availableConnections.shift();
+      const conn = this.pool.get(id);
+      
+      if (conn && conn.status === 'ready') {
+        this.availableConnections.push(id); // Return to pool
+        return conn;
+      } else {
+        this.removeConnectionFromPool(id);
+      }
+    }
+
+    throw new Error('No Redis connections available');
+  }
+
+  removeConnectionFromPool(id) {
+    const conn = this.pool.get(id);
+    if (conn) {
+      conn.disconnect();
+      this.pool.delete(id);
+    }
+    this.availableConnections = this.availableConnections.filter(cid => cid !== id);
+    
+    // Check if we need to create new connections
+    if (this.pool.size < this.config.minPoolSize) {
+      this.addConnectionToPool().catch(error => {
+        logger.error('Failed to add new connection to pool:', error);
+      });
+    }
+  }
+
+  async executeWithRetry(operation) {
+    let lastError = null;
+    
+    for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
+      try {
+        const connection = await this.getConnection();
+        return await operation(connection);
+      } catch (error) {
+        lastError = error;
+        logger.warn(`Redis operation failed (attempt ${attempt + 1}):`, error);
+        
+        if (error.message.includes('READONLY')) {
+          await this.handleReadOnlyError();
+          continue;
+        }
+        
+        const delay = this.backoff.getDelay(attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    throw lastError;
+  }
+
+  async handleReadOnlyError() {
+    logger.warn('Redis in read-only mode, attempting to recover');
+    // Clear pool and reinitialize
+    for (const [id, conn] of this.pool.entries()) {
+      await conn.disconnect();
+      this.pool.delete(id);
+    }
+    this.availableConnections = [];
+    await this.initializePool();
   }
 
   /**
    * Check Redis connection
    */
   async ping() {
-    try {
-      const result = await this.redis.ping();
+    return this.executeWithRetry(async (connection) => {
+      const result = await connection.ping();
       this.isConnected = result === 'PONG';
       return this.isConnected;
-    } catch (error) {
-      this.isConnected = false;
-      logger.error('Redis ping failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
-   * Set a value with automatic reconnection
+   * Set a value with automatic reconnection and retry
    */
   async set(key, value, ttl = null) {
-    try {
-      await this.ensureConnection();
+    return this.executeWithRetry(async (connection) => {
       if (ttl) {
-        await this.redis.setex(key, ttl, value);
+        await connection.setex(key, ttl, value);
       } else {
-        await this.redis.set(key, value);
+        await connection.set(key, value);
       }
-    } catch (error) {
-      logger.error('Redis set failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
-   * Get a value with automatic reconnection
+   * Get a value with automatic reconnection and retry
    */
   async get(key) {
-    try {
-      await this.ensureConnection();
-      const value = await this.redis.get(key);
+    return this.executeWithRetry(async (connection) => {
+      const value = await connection.get(key);
       logger.debug('Redis get:', { key, exists: !!value });
       return value;
-    } catch (error) {
-      logger.error('Redis get failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
-   * Delete a value with automatic reconnection
+   * Delete a value with automatic reconnection and retry
    */
   async del(key) {
-    try {
-      await this.ensureConnection();
-      await this.redis.del(key);
+    return this.executeWithRetry(async (connection) => {
+      await connection.del(key);
       logger.debug('Redis del:', { key });
-    } catch (error) {
-      logger.error('Redis delete failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
-   * Check if key exists with automatic reconnection
+   * Check if key exists with automatic reconnection and retry
    */
   async exists(key) {
-    try {
-      await this.ensureConnection();
-      const exists = await this.redis.exists(key);
+    return this.executeWithRetry(async (connection) => {
+      const exists = await connection.exists(key);
       logger.debug('Redis exists:', { key, exists: !!exists });
       return !!exists;
-    } catch (error) {
-      logger.error('Redis exists check failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
    * Set value with expiration and automatic reconnection
    */
   async setEx(key, value, ttl) {
-    try {
-      await this.ensureConnection();
-      await this.redis.setex(key, ttl, value);
+    return this.executeWithRetry(async (connection) => {
+      await connection.setex(key, ttl, value);
       logger.debug('Redis setEx:', { key, ttl });
-    } catch (error) {
-      logger.error('Redis setEx failed:', error);
-      throw error;
-    }
+    });
   }
 
   /**
    * Get keys matching pattern with automatic reconnection
    */
   async keys(pattern) {
-    try {
-      await this.ensureConnection();
-      const keys = await this.redis.keys(pattern);
+    return this.executeWithRetry(async (connection) => {
+      const keys = await connection.keys(pattern);
       logger.debug('Redis keys:', { pattern, count: keys.length });
       return keys;
-    } catch (error) {
-      logger.error('Redis keys error:', error, { pattern });
-      throw error;
-    }
+    });
   }
 
   /**
-   * Ensure Redis connection is active
-   */
-  async ensureConnection() {
-    if (!this.isConnected) {
-      await this.connect();
-    }
-  }
-
-  /**
-   * Get connection status
+   * Get connection status and pool information
    */
   getStatus() {
     return {
       connected: this.isConnected,
       error: this.connectionError?.message,
-      reconnectAttempts: this.reconnectAttempts
+      reconnectAttempts: this.reconnectAttempts,
+      pool: {
+        size: this.pool.size,
+        available: this.availableConnections.length,
+        max: this.config.maxPoolSize,
+        min: this.config.minPoolSize
+      }
     };
   }
 
   /**
-   * Gracefully close Redis connection
+   * Gracefully close all Redis connections
    */
   async quit() {
-    try {
-      if (this.isConnected) {
-        await this.redis.quit();
+    logger.info('Closing all Redis connections...');
+    
+    const closePromises = Array.from(this.pool.values()).map(async (connection) => {
+      try {
+        await connection.quit();
+      } catch (error) {
+        logger.error('Error closing Redis connection:', error);
       }
-      this.isConnected = false;
-      logger.info('Redis connection closed');
-    } catch (error) {
-      logger.error('Redis quit error:', error);
-      throw error;
-    }
+    });
+
+    await Promise.allSettled(closePromises);
+    
+    this.pool.clear();
+    this.availableConnections = [];
+    this.isConnected = false;
+    
+    logger.info('All Redis connections closed');
   }
 } 
