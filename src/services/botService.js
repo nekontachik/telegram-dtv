@@ -12,7 +12,8 @@ import { registerCommandHandlers } from '../handlers/commandHandler.js';
 class BotService {
   constructor() {
     this.bot = null;
-    this.userThreads = new Map();
+    // We'll use Redis KV in production and Map in development
+    this.storage = process.env.VERCEL ? null : new Map();
   }
 
   /**
@@ -37,11 +38,32 @@ class BotService {
           interval: 300,
           autoStart: true
         }
-      } : {
-        webHook: true
-      };
+      } : {};  // In production, we don't need any options as we're using webhooks
 
       this.bot = new TelegramBot(config.telegram.token, options);
+
+      // Configure webhook in production mode
+      if (mode === 'production') {
+        logger.info('Configuring webhook in production mode');
+        const webhookUrl = 'https://telegram-dtv.vercel.app/webhook';
+        
+        // Remove any existing webhook first
+        await this.bot.deleteWebHook();
+        
+        // Set the new webhook with allowed updates
+        await this.bot.setWebHook(webhookUrl, {
+          allowed_updates: ['message', 'callback_query'],
+          drop_pending_updates: true
+        });
+        
+        // Verify webhook was set
+        const webhookInfo = await this.bot.getWebHookInfo();
+        logger.info('Webhook configured:', webhookInfo);
+        
+        if (!webhookInfo.url) {
+          throw new Error('Webhook setup failed - URL is empty');
+        }
+      }
 
       // Register message and command handlers
       logger.info('Registering message and command handlers');
@@ -80,7 +102,18 @@ class BotService {
    */
   async storeUserThread(chatId, threadId) {
     logger.info('Storing thread for chat', { chatId, threadId });
-    this.userThreads.set(chatId, threadId);
+    if (process.env.VERCEL) {
+      // In production, store in Redis KV
+      const key = `thread:${chatId}`;
+      await fetch(`${process.env.VERCEL_URL}/api/kv/set`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: threadId })
+      });
+    } else {
+      // In development, use Map
+      this.storage.set(chatId, threadId);
+    }
   }
 
   /**
@@ -89,9 +122,15 @@ class BotService {
    * @returns {Promise<boolean>} - Whether the user has an active thread
    */
   async hasActiveThread(chatId) {
-    const hasThread = this.userThreads.has(chatId);
-    logger.info('Checking active thread', { chatId, hasThread });
-    return hasThread;
+    try {
+      const threadId = await this.getUserThread(chatId);
+      const hasThread = !!threadId;
+      logger.info('Checking active thread', { chatId, hasThread });
+      return hasThread;
+    } catch (error) {
+      logger.error('Error checking active thread', error, { chatId });
+      return false;
+    }
   }
 
   /**
@@ -100,9 +139,24 @@ class BotService {
    * @returns {Promise<string|null>} - The user's thread ID or null if not found
    */
   async getUserThread(chatId) {
-    const threadId = this.userThreads.get(chatId) || null;
-    logger.info('Getting user thread', { chatId, threadId });
-    return threadId;
+    try {
+      let threadId = null;
+      if (process.env.VERCEL) {
+        // In production, get from Redis KV
+        const key = `thread:${chatId}`;
+        const response = await fetch(`${process.env.VERCEL_URL}/api/kv/get?key=${key}`);
+        const data = await response.json();
+        threadId = data.value;
+      } else {
+        // In development, use Map
+        threadId = this.storage.get(chatId);
+      }
+      logger.info('Getting user thread', { chatId, threadId });
+      return threadId || null;
+    } catch (error) {
+      logger.error('Error getting user thread', error, { chatId });
+      return null;
+    }
   }
 
   /**
