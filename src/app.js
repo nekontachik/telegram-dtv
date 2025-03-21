@@ -126,16 +126,35 @@ async function init() {
     registerCommandHandlers(bot);
 
     // Set up webhook handling
-    app.post('/webhook', (req, res) => {
-      bot.handleUpdate(req.body);
-      res.sendStatus(200);
+    app.post('/webhook', async (req, res) => {
+      try {
+        logger.info('Received webhook update', { 
+          update_id: req.body.update_id,
+          message_id: req.body.message?.message_id 
+        });
+        
+        await bot.handleUpdate(req.body);
+        res.sendStatus(200);
+      } catch (error) {
+        logger.error('Error handling webhook update', error, {
+          body: req.body,
+          persistent: true
+        });
+        // Still return 200 to prevent Telegram from retrying
+        res.sendStatus(200);
+      }
     });
 
     // Health check endpoint
     app.get('/health', (req, res) => {
       res.status(200).json({ 
         status: 'ok',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        initialized: initialized,
+        bot_info: {
+          username: bot.botInfo?.username,
+          webhook_set: true
+        }
       });
     });
 

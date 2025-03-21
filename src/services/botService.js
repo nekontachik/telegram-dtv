@@ -11,6 +11,7 @@ import { SessionCache } from '../utils/cache.js';
 import { retryOperation } from '../utils/cache.js';
 import { instanceManager } from '../utils/instanceManager.js';
 import { messageQueue } from '../utils/messageQueue.js';
+import { registerMessageHandler, registerCommandHandlers } from '../utils/messageHandler.js';
 
 class BotService {
   constructor() {
@@ -34,114 +35,31 @@ class BotService {
 
       // Check if we can start a bot instance
       if (!(await instanceManager.registerInstance())) {
-        logger.error('Another bot instance is already running', new Error('Duplicate instance'), { 
-          persistent: true 
-        });
-        throw new Error('Another bot instance is already running. Please stop it before starting a new one.');
+        if (!process.env.VERCEL) {  // Only throw in non-serverless environment
+          logger.error('Another bot instance is already running', new Error('Duplicate instance'), { 
+            persistent: true 
+          });
+          throw new Error('Another bot instance is already running. Please stop it before starting a new one.');
+        }
       }
 
-      // Wait a moment before initializing to ensure any other instances are fully cleaned up
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Delete any existing webhook
-      await this._deleteWebhook();
-
       // Initialize bot with appropriate configuration
-      const isProduction = process.env.NODE_ENV === 'production';
-      const options = isProduction ? {
-        webHook: {
-          port: process.env.PORT || 3000
-        }
-      } : {
+      const options = process.env.VERCEL ? {} : {
         polling: true,
         testEnvironment: true,
         polling_interval: 300,
         timeout: 60
       };
 
-      // Validate token before initializing bot
-      try {
-        const response = await fetch(`https://api.telegram.org/bot${config.telegram.token}/getMe`);
-        const data = await response.json();
-        if (!data.ok) {
-          throw new Error(`Invalid Telegram token: ${data.description}`);
-        }
-        logger.info('Telegram token validated successfully');
-      } catch (error) {
-        logger.error('Invalid Telegram token', error, { persistent: true });
-        throw new Error('Failed to validate Telegram token. Please check your TELEGRAM_TOKEN environment variable.');
-      }
-
       this.bot = new TelegramBot(config.telegram.token, options);
-
-      // Set up webhook in production
-      if (isProduction) {
-        const webhookUrl = `${process.env.VERCEL_URL}/webhook`;
-        await this.bot.setWebHook(webhookUrl);
-        logger.info(`Webhook set to ${webhookUrl}`);
-      }
       
-      // Handle polling errors in development
-      if (!isProduction) {
-        this.bot.on('polling_error', (error) => {
-          logger.error('Telegram polling error', error, { warning: true });
-          
-          if (error.message.includes('404 Not Found')) {
-            logger.error('Invalid Telegram token', error, { 
-              persistent: true,
-              token: config.telegram.token.substring(0, 5) + '...'
-            });
-          } else if (error.message.includes('409 Conflict')) {
-            logger.warn('Multiple bot instances detected', { message: error.message });
-            
-            if (this.initRetries < this.maxInitRetries) {
-              this.initRetries++;
-              logger.info(`Attempting to reinitialize bot (attempt ${this.initRetries}/${this.maxInitRetries})...`);
-              
-              if (this.bot) {
-                this.bot.stopPolling()
-                  .then(() => {
-                    logger.info('Successfully stopped polling');
-                    setTimeout(() => {
-                      this.init()
-                        .then(() => logger.info('Bot reinitialized successfully'))
-                        .catch(e => logger.error('Failed to reinitialize bot', e));
-                    }, 2000);
-                  })
-                  .catch(e => logger.error('Error stopping polling', e));
-              }
-            }
-          }
-        });
-      }
+      // Register message and command handlers
+      registerMessageHandler(this.bot);
+      registerCommandHandlers(this.bot);
 
-      // Check if database is available
-      this.useDatabase = dbService.isInitialized();
-      logger.info(`Database integration: ${this.useDatabase ? 'Enabled' : 'Disabled'}`);
-      
-      // Load existing sessions if database is available
-      if (this.useDatabase) {
-        await this._loadSessionsFromDatabase();
-      }
-
-      // Add message queue handling
-      this.bot.on('message', (msg) => {
-        if (msg.text && msg.text.startsWith('/')) return;
-        
-        messageQueue.add(msg, async (message) => {
-          if (!message || !message.chat || !message.chat.id) {
-            logger.warn('Invalid message format', { message });
-            return;
-          }
-        });
-      });
-
-      // Reset retries counter since we've successfully initialized
-      this.initRetries = 0;
-      
       return this.bot;
     } catch (error) {
-      logger.error('Failed to initialize Telegram bot', error, { persistent: true });
+      logger.error('Failed to initialize Telegram bot', error);
       throw error;
     }
   }

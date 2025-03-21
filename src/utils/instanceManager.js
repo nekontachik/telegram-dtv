@@ -13,7 +13,7 @@ import { logger } from './logger.js';
 class InstanceManager {
   constructor() {
     this.instanceId = crypto.randomUUID();
-    this.hostname = os.hostname();
+    this.hostname = process.env.VERCEL ? 'vercel-serverless' : os.hostname();
     this.heartbeatInterval = null;
     this.isRegistered = false;
     this.staleInstanceTimeout = 30000; // 30 seconds
@@ -36,6 +36,12 @@ class InstanceManager {
    * @returns {Promise<boolean>} - true, якщо екземпляр успішно зареєстровано
    */
   async registerInstance() {
+    // In serverless environment, always allow running
+    if (process.env.VERCEL) {
+      logger.info('Running in serverless environment, skipping instance registration');
+      return true;
+    }
+
     try {
       if (!dbService.isInitialized()) {
         logger.warn('Database not initialized, cannot register bot instance');
@@ -113,6 +119,11 @@ class InstanceManager {
    * Видаляє екземпляр з бази даних при завершенні
    */
   async cleanupOnExit() {
+    // Skip cleanup in serverless environment
+    if (process.env.VERCEL) {
+      return;
+    }
+
     logger.info('Bot shutting down, cleaning up...', { persistent: true });
     
     if (this.heartbeatInterval) {
