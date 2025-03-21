@@ -1,14 +1,39 @@
 # GPTs Telegram Bot
 
-A Telegram bot powered by OpenAI's GPT models that provides intelligent conversation capabilities with database persistence and operator handoff features.
+A Telegram bot powered by OpenAI's GPT models with conversation persistence and operator handoff capabilities.
 
 ## Features
 
 - OpenAI GPT integration
 - Conversation persistence with Supabase
-- Operator handoff functionality
-- Instance management for production deployment
 - Webhook support for Vercel deployment
+- Operator handoff system
+- Instance management for multiple bot instances
+
+## Deployment Status
+[![Deployed on Vercel](https://therealsujitk-vercel-badge.vercel.app/?app=gpts-telegram)](https://vercel.com)
+
+Last deployed: March 21, 2024
+
+## Environment Variables Required
+```env
+TELEGRAM_TOKEN=<your_telegram_bot_token>
+OPENAI_API_KEY=<your_openai_api_key>
+NODE_ENV=production
+```
+
+Optional but recommended:
+```env
+SUPABASE_URL=<your_supabase_url>
+SUPABASE_KEY=<your_supabase_key>
+```
+
+## Quick Start
+1. Clone the repository
+2. Install dependencies: `npm install`
+3. Set up environment variables
+4. Run locally: `npm run dev`
+5. Deploy to Vercel: Push to main branch
 
 ## Prerequisites
 
