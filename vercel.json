@@ -9,7 +9,12 @@
   "routes": [
     {
       "src": "/health",
-      "dest": "src/app.js"
+      "dest": "src/app.js",
+      "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      }
     },
     {
       "src": "/webhook",
