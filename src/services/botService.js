@@ -53,7 +53,7 @@ class BotService {
       // Configure webhook in production mode
       if (mode === 'production') {
         logger.info('Configuring webhook in production mode');
-        const webhookUrl = 'https://telegram-dtv.vercel.app/webhook';
+        const webhookUrl = 'https://telegram-6x6tztptu-bekihueki-gmailcoms-projects.vercel.app/webhook';
         
         // Remove any existing webhook first
         await this.bot.deleteWebHook();
