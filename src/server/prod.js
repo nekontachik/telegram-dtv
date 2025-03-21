@@ -20,23 +20,22 @@ async function initializeBot() {
     // Validate configuration
     config.validate();
     
-    // Validate OpenAI API key
+    // Initialize OpenAI
     const isValidKey = await openaiService.validateApiKey();
     if (!isValidKey) {
       throw new Error("Invalid OpenAI API key");
     }
     
-    // Create or retrieve the assistant
     await openaiService.createOrGetAssistant();
-    logger.info("Assistant initialized with ID: " + openaiService.assistantId);
+    logger.info("Assistant ready:", openaiService.assistantId);
     
-    // Initialize Telegram bot in webhook mode
+    // Initialize bot
     await botService.init({ mode: 'production' });
     initialized = true;
     
-    logger.info("Production bot initialization complete");
+    logger.info("Bot initialization complete");
   } catch (error) {
-    logger.error('Error initializing production bot', error);
+    logger.error('Failed to initialize:', error);
     throw error;
   }
 }
@@ -44,59 +43,48 @@ async function initializeBot() {
 // Vercel serverless handler
 export default async function handler(req, res) {
   try {
-    logger.info('Received request:', { 
+    logger.info('Request received:', { 
       method: req.method, 
-      url: req.url,
-      body: req.method === 'POST' ? JSON.stringify(req.body).substring(0, 100) : undefined 
+      url: req.url
     });
 
-    // Health check endpoint
+    // Health check
     if (req.method === 'GET' && req.url === '/health') {
       await initializeBot();
       return res.status(200).json({ 
         status: 'ok',
-        timestamp: new Date().toISOString(),
         initialized,
-        mode: 'production',
         assistantId: openaiService.assistantId
       });
     }
 
-    // Webhook endpoint
+    // Webhook handler
     if (req.method === 'POST' && req.url === '/webhook') {
       await initializeBot();
       
       const update = req.body;
       if (!update) {
-        logger.error('No update body received');
-        return res.status(400).json({ error: 'No update body' });
+        logger.error('Empty webhook body');
+        return res.status(400).json({ error: 'Empty webhook body' });
       }
 
-      logger.info('Processing webhook update:', { 
-        update_id: update.update_id,
-        message_id: update.message?.message_id,
-        text: update.message?.text?.substring(0, 50),
-        chat_id: update.message?.chat?.id
+      logger.info('Processing update:', { 
+        updateId: update.update_id,
+        type: update.message ? 'message' : update.callback_query ? 'callback' : 'other',
+        chatId: update.message?.chat?.id || update.callback_query?.message?.chat?.id
       });
 
       const bot = botService.getBot();
-      if (!bot) {
-        throw new Error('Bot not initialized');
-      }
-
-      // Process the update
       await bot.handleUpdate(update);
       
-      // Always return 200 to Telegram
       return res.status(200).end();
     }
 
-    // Handle all other routes
-    logger.info('Route not found:', req.url);
+    // Not found
+    logger.warn('Route not found:', req.url);
     return res.status(404).json({ error: 'Not found' });
   } catch (error) {
-    logger.error('Request handler error:', error);
-    // Don't expose internal errors
+    logger.error('Request failed:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 } 
