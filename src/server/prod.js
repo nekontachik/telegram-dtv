@@ -3,19 +3,41 @@
  * Handles bot initialization in webhook mode
  */
 
+import express from 'express';
 import { config } from '../config/config.js';
 import { botService } from '../services/botService.js';
 import { openaiService } from '../services/openaiService.js';
 import { logger } from '../utils/logger.js';
 
-let initialized = false;
+const app = express();
+app.use(express.json());
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    res.json({ status: 'ok' });
+  } catch (error) {
+    logger.error('Health check failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Webhook endpoint
+app.post('/webhook', async (req, res) => {
+  try {
+    const update = req.body;
+    await botService.getBot().handleUpdate(update);
+    res.sendStatus(200);
+  } catch (error) {
+    logger.error('Webhook processing failed:', error);
+    res.sendStatus(200); // Always return 200 to Telegram
+  }
+});
 
 // Initialize bot and services
-async function initializeBot() {
-  if (initialized) return;
-
+async function initializeServices() {
   try {
-    logger.info("Initializing bot in production mode...");
+    logger.info("Initializing services...");
     
     // Validate configuration
     config.validate();
@@ -31,71 +53,24 @@ async function initializeBot() {
     
     // Initialize bot
     await botService.init({ mode: 'production' });
-    initialized = true;
     
-    logger.info("Bot initialization complete");
+    logger.info("Services initialized successfully");
   } catch (error) {
-    logger.error('Failed to initialize:', error);
+    logger.error('Failed to initialize services:', error);
     throw error;
   }
 }
 
-// Vercel serverless handler
-export const config = {
-  api: {
-    bodyParser: true,
-  },
-};
+// Start the server
+const PORT = process.env.PORT || 3000;
 
-export default async function handler(req, res) {
-  // Allow webhook and health endpoints without auth
-  if ((req.method === 'POST' && req.url === '/webhook') || 
-      (req.method === 'GET' && req.url === '/health')) {
-    try {
-      logger.info('Request received:', { 
-        method: req.method, 
-        url: req.url,
-        body: req.method === 'POST' ? JSON.stringify(req.body).substring(0, 100) : undefined
-      });
-
-      // Health check
-      if (req.method === 'GET' && req.url === '/health') {
-        await initializeBot();
-        return res.status(200).json({ 
-          status: 'ok',
-          initialized,
-          assistantId: openaiService.assistantId
-        });
-      }
-
-      // Webhook handler
-      if (req.method === 'POST' && req.url === '/webhook') {
-        await initializeBot();
-        
-        const update = req.body;
-        if (!update) {
-          logger.error('Empty webhook body');
-          return res.status(400).json({ error: 'Empty webhook body' });
-        }
-
-        logger.info('Processing update:', { 
-          updateId: update.update_id,
-          type: update.message ? 'message' : update.callback_query ? 'callback' : 'other',
-          chatId: update.message?.chat?.id || update.callback_query?.message?.chat?.id,
-          text: update.message?.text?.substring(0, 50)
-        });
-
-        const bot = botService.getBot();
-        await bot.handleUpdate(update);
-        
-        return res.status(200).end();
-      }
-    } catch (error) {
-      logger.error('Request failed:', error);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-  }
-
-  // All other routes require auth
-  return res.status(401).json({ error: 'Unauthorized' });
-} 
+initializeServices()
+  .then(() => {
+    app.listen(PORT, () => {
+      logger.info(`Server is running on port ${PORT}`);
+    });
+  })
+  .catch(error => {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }); 
