@@ -21,7 +21,6 @@ class BotService {
     this.sessionCache = new SessionCache(3600000); // 1 година кешування
     this.initRetries = 0;
     this.maxInitRetries = 3;
-    this.init();
   }
 
   /**
@@ -31,6 +30,10 @@ class BotService {
    */
   async init() {
     try {
+      if (this.bot) {
+        return this.bot;
+      }
+
       logger.info('Initializing Telegram bot');
 
       // Check if we can start a bot instance
@@ -44,7 +47,11 @@ class BotService {
       }
 
       // Initialize bot with appropriate configuration
-      const options = process.env.VERCEL ? {} : {
+      const options = process.env.VERCEL ? {
+        webHook: {
+          port: process.env.PORT || 3000
+        }
+      } : {
         polling: true,
         testEnvironment: true,
         polling_interval: 300,
@@ -56,6 +63,13 @@ class BotService {
       // Register message and command handlers
       registerMessageHandler(this.bot);
       registerCommandHandlers(this.bot);
+
+      if (process.env.VERCEL) {
+        // Set webhook for Vercel deployment
+        const webhookUrl = `https://${process.env.VERCEL_URL}/webhook`;
+        await this.bot.setWebHook(webhookUrl);
+        logger.info(`Webhook set to ${webhookUrl}`);
+      }
 
       return this.bot;
     } catch (error) {

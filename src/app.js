@@ -177,6 +177,7 @@ async function init() {
 // Initialize and export for Vercel
 let initialized = false;
 let cachedApp = null;
+let cachedBot = null;
 
 export default async function handler(req, res) {
   // Health check endpoint - no initialization required
@@ -184,17 +185,48 @@ export default async function handler(req, res) {
     return res.status(200).json({ 
       status: 'ok',
       timestamp: new Date().toISOString(),
-      env: process.env.NODE_ENV
+      env: process.env.NODE_ENV,
+      initialized: initialized
     });
   }
 
-  if (!initialized) {
-    try {
-      cachedApp = await init();
-      initialized = true;
-    } catch (error) {
-      return res.status(500).json({ error: 'Failed to initialize bot' });
-    }
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return res.status(200).end();
   }
-  return cachedApp(req, res);
+
+  try {
+    if (!initialized) {
+      logger.info("Initializing bot in serverless environment...");
+      cachedBot = await botService.init();
+      initialized = true;
+    }
+
+    if (req.method === 'POST' && req.url === '/webhook') {
+      try {
+        logger.info('Received webhook update', { 
+          update_id: req.body.update_id,
+          message_id: req.body.message?.message_id 
+        });
+        
+        await cachedBot.handleUpdate(req.body);
+        return res.status(200).end();
+      } catch (error) {
+        logger.error('Error handling webhook update', error, {
+          body: req.body,
+          persistent: true
+        });
+        // Still return 200 to prevent Telegram from retrying
+        return res.status(200).end();
+      }
+    }
+
+    return res.status(404).json({ error: 'Not found' });
+  } catch (error) {
+    logger.error('Error in serverless handler', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 }
