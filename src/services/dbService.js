@@ -3,7 +3,8 @@
  * Handles all database operations
  */
 
-import { createClient } from '@supabase/supabase-js';
+import pkg from '@supabase/supabase-js';
+const { createClient } = pkg;
 import { logger } from '../utils/logger.js';
 
 class DbService {

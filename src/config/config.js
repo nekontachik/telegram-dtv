@@ -11,8 +11,14 @@ dotenv.config();
 
 class Config {
   constructor() {
+    this.server = {
+      port: process.env.PORT || 3000,
+      host: '0.0.0.0'
+    };
+
     this.telegram = {
-      token: process.env.TELEGRAM_TOKEN,
+      token: process.env.TELEGRAM_BOT_TOKEN,
+      webhookUrl: this.getWebhookUrl(),
       operatorUsername: process.env.TELEGRAM_OPERATOR_USERNAME || 'capyoperator',
       operatorChatLink: process.env.TELEGRAM_OPERATOR_CHAT_LINK || `https://t.me/${process.env.TELEGRAM_OPERATOR_USERNAME || 'capyoperator'}`,
       operatorTransferMessage: process.env.TELEGRAM_OPERATOR_TRANSFER_MESSAGE || 
@@ -25,10 +31,44 @@ class Config {
       model: process.env.ASSISTANT_MODEL || 'gpt-4-turbo-preview'
     };
     
+    // Make Redis optional
+    this.redis = process.env.REDIS_URL ? {
+      url: process.env.REDIS_URL,
+      maxRetries: 10,
+      retryDelay: 3000
+    } : null;
+
+    // Use in-memory storage if Redis is not configured
+    this.useInMemoryStorage = !this.redis;
+
+    // Supabase configuration
     this.supabase = {
       url: process.env.SUPABASE_URL,
-      key: process.env.SUPABASE_KEY
+      key: process.env.SUPABASE_KEY,
+      enabled: !!(process.env.SUPABASE_URL && process.env.SUPABASE_KEY)
     };
+  }
+
+  /**
+   * Get webhook URL based on environment
+   */
+  getWebhookUrl() {
+    // For Render deployment
+    if (process.env.RENDER_EXTERNAL_URL) {
+      return `${process.env.RENDER_EXTERNAL_URL}/webhook`;
+    }
+    
+    // For local development
+    if (process.env.NODE_ENV === 'development') {
+      return null;
+    }
+
+    // For custom domain
+    if (process.env.WEBHOOK_URL) {
+      return process.env.WEBHOOK_URL;
+    }
+
+    throw new Error('No webhook URL configured');
   }
   
   /**
@@ -37,7 +77,7 @@ class Config {
    */
   validate() {
     if (!this.telegram.token) {
-      throw new Error('TELEGRAM_TOKEN is required');
+      throw new Error('TELEGRAM_BOT_TOKEN is required');
     }
     
     if (!this.openai.apiKey) {
@@ -46,6 +86,14 @@ class Config {
 
     if (!this.openai.assistantId) {
       throw new Error('ASSISTANT_ID is required');
+    }
+
+    if (!this.redis) {
+      logger.warn('REDIS_URL not set, using in-memory storage (not recommended for production)');
+    }
+
+    if (!this.supabase.enabled) {
+      logger.warn('Supabase not configured, message logging will be disabled');
     }
     
     // Log warnings for optional configs
@@ -56,21 +104,15 @@ class Config {
     if (!this.telegram.operatorChatLink) {
       logger.warn('TELEGRAM_OPERATOR_CHAT_LINK not set, using default t.me link');
     }
-    
-    // Validate Supabase configuration if both URL and key are provided
-    if (this.supabase.url && this.supabase.key) {
-      logger.info('Supabase configuration found');
-    } else if (!this.supabase.url && !this.supabase.key) {
-      logger.warn('Supabase configuration not found, running without database');
-    } else {
-      throw new Error('Both SUPABASE_URL and SUPABASE_KEY are required for database integration');
-    }
 
     logger.info('Configuration validated successfully', {
       hasToken: !!this.telegram.token,
       hasOpenAIKey: !!this.openai.apiKey,
       hasAssistantId: !!this.openai.assistantId,
-      model: this.openai.model
+      storage: this.redis ? 'redis' : 'memory',
+      database: this.supabase.enabled ? 'supabase' : 'disabled',
+      model: this.openai.model,
+      webhookUrl: this.telegram.webhookUrl
     });
   }
 }
