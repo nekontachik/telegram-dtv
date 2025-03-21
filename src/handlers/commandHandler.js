@@ -37,6 +37,17 @@ export const registerCommandHandlers = async (bot) => {
     }
   });
 
+  // Handle the /help command
+  bot.onText(/\/help/, async (msg) => {
+    const chatId = msg.chat.id;
+    const helpText = 
+      "Available commands:\n" +
+      "/start - Start a new conversation\n" +
+      "/help - Show this help message";
+    
+    await bot.sendMessage(chatId, helpText);
+  });
+
   // Command to enable human handoff mode for a specific chat
   bot.onText(/\/handoff (.+)/, async (msg, match) => {
     const operatorId = msg.chat.id;
