@@ -125,35 +125,44 @@ async function init() {
     registerMessageHandler(bot);
     registerCommandHandlers(bot);
 
-    // Set up webhook handling in production
-    if (process.env.NODE_ENV === 'production') {
-      // Webhook endpoint
-      app.post('/webhook', (req, res) => {
-        bot.handleUpdate(req.body);
-        res.sendStatus(200);
-      });
+    // Set up webhook handling
+    app.post('/webhook', (req, res) => {
+      bot.handleUpdate(req.body);
+      res.sendStatus(200);
+    });
 
-      // Health check endpoint
-      app.get('/health', (req, res) => {
-        res.status(200).json({ status: 'ok' });
+    // Health check endpoint
+    app.get('/health', (req, res) => {
+      res.status(200).json({ 
+        status: 'ok',
+        timestamp: new Date().toISOString()
       });
+    });
 
-      // Start Express server
-      const port = process.env.PORT || 3000;
-      app.listen(port, () => {
-        logger.info(`Webhook server is listening on port ${port}`);
-      });
-    } else {
-      // In development, check for conflicting processes
-      await checkForRunningBots();
-    }
+    // In development, check for conflicting processes
+    await checkForRunningBots();
     
     logger.info("Bot is running and waiting for messages...", { persistent: true });
+    
+    return app;
   } catch (error) {
     logger.error("Error initializing bot", error, { persistent: true });
-    process.exit(1);
+    throw error;
   }
 }
 
-// Запуск бота
-init();
+// Initialize and export for Vercel
+let initialized = false;
+let cachedApp = null;
+
+export default async function handler(req, res) {
+  if (!initialized) {
+    try {
+      cachedApp = await init();
+      initialized = true;
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to initialize bot' });
+    }
+  }
+  return cachedApp(req, res);
+}
