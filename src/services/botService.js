@@ -59,6 +59,19 @@ class BotService {
         timeout: 60
       };
 
+      // Validate token before initializing bot
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${config.telegram.token}/getMe`);
+        const data = await response.json();
+        if (!data.ok) {
+          throw new Error(`Invalid Telegram token: ${data.description}`);
+        }
+        logger.info('Telegram token validated successfully');
+      } catch (error) {
+        logger.error('Invalid Telegram token', error, { persistent: true });
+        throw new Error('Failed to validate Telegram token. Please check your TELEGRAM_TOKEN environment variable.');
+      }
+
       this.bot = new TelegramBot(config.telegram.token, options);
 
       // Set up webhook in production

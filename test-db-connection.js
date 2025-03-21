@@ -2,41 +2,27 @@
  * Тестовий скрипт для перевірки підключення до Supabase
  */
 
+import { config } from './src/config/config.js';
 import { dbService } from './src/services/dbService.js';
+import { logger } from './src/utils/logger.js';
 
 async function testConnection() {
-  console.log('Тестування підключення до Supabase...');
-  
   try {
-    const db = dbService.getInstance();
-    if (!db.isInitialized()) {
-      console.error('❌ База даних не ініціалізована');
-      process.exit(1);
+    // Initialize the database service
+    dbService.init(config.supabase.url, config.supabase.key);
+    
+    if (!dbService.isInitialized()) {
+      throw new Error('Database service not initialized');
     }
 
-    console.log('✅ База даних успішно ініціалізована');
+    // Test getting all sessions
+    const sessions = await dbService.getAllSessions();
+    console.log('Successfully retrieved sessions:', sessions);
 
-    // Get all sessions
-    const sessions = await db.getAllSessions();
-    console.log(`Знайдено ${sessions.length} сесій у базі даних`);
-    if (sessions.length > 0) {
-      console.log('Приклад сесії:', sessions[0]);
-    }
-    
-    // Отримання повідомлень (для першої сесії, якщо вона існує)
-    if (sessions.length > 0) {
-      const chatId = sessions[0].chat_id;
-      console.log(`\nОстанні повідомлення для chat_id ${chatId}:`);
-      const messages = await db.getRecentMessages(chatId, 5);
-      console.log(`Знайдено ${messages.length} повідомлень для chat_id ${chatId}`);
-      if (messages.length > 0) {
-        console.log('Приклад повідомлення:', messages[0]);
-      }
-    }
-    
-    console.log('✅ Тест підключення до бази даних успішно завершено');
+    console.log('✅ Database connection test successful!');
   } catch (error) {
-    console.error('❌ Помилка під час тестування підключення до бази даних:', error);
+    console.error('❌ Database connection test failed:', error);
+    process.exit(1);
   }
 }
 
