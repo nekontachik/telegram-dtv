@@ -21,8 +21,8 @@ class Config {
     
     this.openai = {
       apiKey: process.env.OPENAI_API_KEY,
-      assistantId: process.env.OPENAI_ASSISTANT_ID,
-      model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview'
+      assistantId: process.env.ASSISTANT_ID,
+      model: process.env.ASSISTANT_MODEL || 'gpt-4-turbo-preview'
     };
     
     this.supabase = {
@@ -43,6 +43,10 @@ class Config {
     if (!this.openai.apiKey) {
       throw new Error('OPENAI_API_KEY is required');
     }
+
+    if (!this.openai.assistantId) {
+      throw new Error('ASSISTANT_ID is required');
+    }
     
     // Log warnings for optional configs
     if (!this.telegram.operatorUsername) {
@@ -61,6 +65,13 @@ class Config {
     } else {
       throw new Error('Both SUPABASE_URL and SUPABASE_KEY are required for database integration');
     }
+
+    logger.info('Configuration validated successfully', {
+      hasToken: !!this.telegram.token,
+      hasOpenAIKey: !!this.openai.apiKey,
+      hasAssistantId: !!this.openai.assistantId,
+      model: this.openai.model
+    });
   }
 }
 

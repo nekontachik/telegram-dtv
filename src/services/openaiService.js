@@ -5,11 +5,19 @@
 
 import OpenAI from 'openai';
 import { config } from '../config/config.js';
+import { logger } from '../utils/logger.js';
 
 class OpenAIService {
   constructor() {
     this.client = new OpenAI({ apiKey: config.openai.apiKey });
+    // Use assistant ID from config
     this.assistantId = config.openai.assistantId;
+    
+    if (!this.assistantId) {
+      throw new Error('OPENAI_ASSISTANT_ID is required');
+    }
+    
+    logger.info('OpenAI Service initialized with assistant ID:', this.assistantId);
   }
 
   /**
@@ -20,48 +28,27 @@ class OpenAIService {
     try {
       // Simple API call to test the key
       await this.client.models.list({ limit: 1 });
-      console.log("OpenAI API key is valid.");
+      logger.info("OpenAI API key is valid");
       return true;
     } catch (error) {
-      console.error("Error validating OpenAI API key:", error.message);
-      console.error("Please check your .env file and update the OPENAI_API_KEY value.");
-      console.error("Make sure you're using a valid API key from https://platform.openai.com/api-keys");
+      logger.error("Error validating OpenAI API key:", error.message);
       return false;
     }
   }
 
   /**
-   * Creates or retrieves an assistant
+   * Retrieves the Capy Concierge assistant
    * @returns {Promise<string>} - The assistant ID
    */
   async createOrGetAssistant() {
-    if (this.assistantId) {
-      try {
-        // Try to retrieve the existing assistant
-        const assistant = await this.client.beta.assistants.retrieve(this.assistantId);
-        console.log("Using existing assistant:", assistant.id);
-        return assistant.id;
-      } catch (error) {
-        console.error("Error retrieving assistant:", error.message);
-        console.log("Will create a new assistant instead.");
-        this.assistantId = null;
-      }
-    }
-
     try {
-      // Create a new assistant
-      const assistant = await this.client.beta.assistants.create({
-        name: "Telegram Bot Assistant",
-        instructions: "You are a helpful assistant that responds to user queries via Telegram.",
-        model: config.openai.model,
-      });
-      
-      console.log("Created new assistant:", assistant.id);
-      this.assistantId = assistant.id;
+      // Try to retrieve the existing Capy Concierge assistant
+      const assistant = await this.client.beta.assistants.retrieve(this.assistantId);
+      logger.info("Connected to Capy Concierge assistant:", assistant.id);
       return assistant.id;
     } catch (error) {
-      console.error("Error creating assistant:", error);
-      throw error;
+      logger.error("Error retrieving Capy Concierge assistant:", error.message);
+      throw new Error("Failed to connect to Capy Concierge assistant. Please check the assistant ID.");
     }
   }
 
@@ -72,9 +59,10 @@ class OpenAIService {
   async createThread() {
     try {
       const thread = await this.client.beta.threads.create();
+      logger.info("Created new thread:", thread.id);
       return thread.id;
     } catch (error) {
-      console.error("Error creating thread:", error);
+      logger.error("Error creating thread:", error);
       throw error;
     }
   }
@@ -85,13 +73,20 @@ class OpenAIService {
    * @param {string} content - Message content
    */
   async addMessageToThread(threadId, content) {
-    return this.client.beta.threads.messages.create(
-      threadId,
-      {
-        role: "user",
-        content
-      }
-    );
+    try {
+      const message = await this.client.beta.threads.messages.create(
+        threadId,
+        {
+          role: "user",
+          content
+        }
+      );
+      logger.info("Added message to thread", { threadId, messageId: message.id });
+      return message;
+    } catch (error) {
+      logger.error("Error adding message to thread:", error);
+      throw error;
+    }
   }
 
   /**
@@ -100,38 +95,49 @@ class OpenAIService {
    * @returns {Promise<string>} - Assistant's response
    */
   async runAssistantAndGetResponse(threadId) {
-    // Create and poll for the run to complete
-    const run = await this.client.beta.threads.runs.createAndPoll(
-      threadId, 
-      { assistant_id: this.assistantId }
-    );
-    
-    console.log("Run completed:", run.status);
-    
-    // Get the latest messages from the thread
-    const messages = await this.client.beta.threads.messages.list(
-      threadId,
-      { order: "desc", limit: 1 }
-    );
-    
-    // Extract the assistant's response
-    if (messages.data.length > 0) {
-      const assistantMessage = messages.data[0];
-      if (assistantMessage.role === "assistant") {
-        let assistantResponse = "";
-        
-        // Extract text content from the message
-        for (const content of assistantMessage.content) {
-          if (content.type === "text") {
-            assistantResponse += content.text.value;
+    try {
+      // Create and poll for the run to complete
+      const run = await this.client.beta.threads.runs.createAndPoll(
+        threadId, 
+        { assistant_id: this.assistantId }
+      );
+      
+      logger.info("Run completed:", { threadId, status: run.status });
+      
+      // Get the latest messages from the thread
+      const messages = await this.client.beta.threads.messages.list(
+        threadId,
+        { order: "desc", limit: 1 }
+      );
+      
+      // Extract the assistant's response
+      if (messages.data.length > 0) {
+        const assistantMessage = messages.data[0];
+        if (assistantMessage.role === "assistant") {
+          let assistantResponse = "";
+          
+          // Extract text content from the message
+          for (const content of assistantMessage.content) {
+            if (content.type === "text") {
+              assistantResponse += content.text.value;
+            }
           }
+          
+          logger.info("Got assistant response", { 
+            threadId, 
+            messageId: assistantMessage.id,
+            length: assistantResponse.length 
+          });
+          return assistantResponse;
         }
-        
-        return assistantResponse;
       }
+      
+      logger.warn("No assistant response found", { threadId });
+      return null;
+    } catch (error) {
+      logger.error("Error getting assistant response:", error);
+      throw error;
     }
-    
-    return null;
   }
 }
 
