@@ -2,14 +2,22 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/app.js",
+      "src": "src/server/prod.js",
       "use": "@vercel/node"
     }
   ],
   "routes": [
     {
+      "src": "/health",
+      "dest": "/src/server/prod.js"
+    },
+    {
+      "src": "/webhook",
+      "dest": "/src/server/prod.js"
+    },
+    {
       "src": "/(.*)",
-      "dest": "/src/app.js"
+      "dest": "/src/server/prod.js"
     }
   ]
 } 
