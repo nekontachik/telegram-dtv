@@ -8,6 +8,14 @@
   ],
   "routes": [
     {
+      "src": "/health",
+      "dest": "src/app.js"
+    },
+    {
+      "src": "/webhook",
+      "dest": "src/app.js"
+    },
+    {
       "src": "/(.*)",
       "dest": "src/app.js"
     }
