@@ -19,7 +19,7 @@ class BotService {
     this.bot = null;
     this.userThreads = {}; // In-memory fallback for user sessions
     this.useDatabase = false; // Will be set to true if dbService is initialized
-    this.sessionCache = new SessionCache(3600000); // 1 година кешування
+    this.sessionCache = new SessionCache(3600000); // 1 hour cache
     this.initRetries = 0;
     this.maxInitRetries = 3;
   }
@@ -60,17 +60,40 @@ class BotService {
       };
 
       this.bot = new TelegramBot(config.telegram.token, options);
+
+      // In webhook mode, we need to handle updates manually
+      if (process.env.VERCEL) {
+        this.bot.setWebHook = async (url) => {
+          try {
+            const response = await fetch(`https://api.telegram.org/bot${config.telegram.token}/setWebhook`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                url,
+                allowed_updates: ['message', 'callback_query'],
+              }),
+            });
+            const data = await response.json();
+            if (!data.ok) {
+              throw new Error(`Failed to set webhook: ${data.description}`);
+            }
+            logger.info(`Webhook set to ${url}`);
+          } catch (error) {
+            logger.error('Error setting webhook', error);
+            throw error;
+          }
+        };
+
+        // Set webhook for Vercel deployment
+        const webhookUrl = `https://${process.env.VERCEL_URL}/webhook`;
+        await this.bot.setWebHook(webhookUrl);
+      }
       
       // Register message and command handlers
       await registerMessageHandler(this.bot);
       await registerCommandHandlers(this.bot);
-
-      if (process.env.VERCEL) {
-        // Set webhook for Vercel deployment
-        const webhookUrl = `https://${process.env.VERCEL_URL}/webhook`;
-        await this.bot.setWebHook(webhookUrl);
-        logger.info(`Webhook set to ${webhookUrl}`);
-      }
 
       return this.bot;
     } catch (error) {
@@ -260,41 +283,24 @@ class BotService {
   }
 
   /**
-   * Send a message to a user
+   * Send a message to a chat
    * @param {number} chatId - The chat ID
    * @param {string} text - The message text
-   * @param {string} role - The role sending the message (default: assistant)
+   * @param {string} [role='assistant'] - The role of the sender
+   * @returns {Promise<void>}
    */
   async sendMessage(chatId, text, role = 'assistant') {
-    if (!this.bot) throw new Error("Bot not initialized");
-    
-    // Check if this is the operator transfer message
-    if (text.includes(config.telegram.operatorTransferMessage)) {
-      // Send the transfer message first
+    try {
       await this.bot.sendMessage(chatId, text);
       
-      // Then send the operator contact button
-      await this.sendOperatorContact(chatId);
-      
-      // Log the transfer
-      logger.info(`User ${chatId} transferred to operator`, {
-        persistent: true,
-        chatId,
-        operatorUsername: config.telegram.operatorUsername
-      });
-      
-      return;
+      // Log message to database if available
+      if (this.useDatabase) {
+        await dbService.logMessage(chatId, text, role);
+      }
+    } catch (error) {
+      logger.error('Error sending message', error, { chatId });
+      throw error;
     }
-    
-    // Log message to database if available
-    if (this.useDatabase) {
-      await dbService.logMessage(chatId, role, text);
-    }
-    
-    // Використовуємо повторні спроби для надійності
-    return retryOperation(async () => {
-      return this.bot.sendMessage(chatId, text);
-    });
   }
 
   /**

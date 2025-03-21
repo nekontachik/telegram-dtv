@@ -14,34 +14,39 @@ import { retryOperation } from '../utils/cache.js';
  * Register message handler on bot
  * @param {TelegramBot} bot - The Telegram bot instance
  */
-export const registerMessageHandler = (bot) => {
-  // Переконуємось, що бот існує
+export const registerMessageHandler = async (bot) => {
+  // Ensure bot exists
   if (!bot) {
     logger.error('Cannot register message handler: bot is null', new Error('Bot is null'));
     return;
   }
+
+  // Register message handler directly on the bot
+  bot.on('message', async (msg) => {
+    // Ignore commands - they're handled separately
+    if (msg.text && msg.text.startsWith('/')) {
+      return;
+    }
+
+    // Add message to queue for processing
+    messageQueue.addItem({ message: msg });
+  });
   
-  // Головний обробник повідомлень вже зареєстрований у botService
-  // Цей код викликається для кожного повідомлення після обробки чергою
+  // Set up message queue processor
   messageQueue.processItem = async (item) => {
     const msg = item.message;
     const chatId = msg.chat.id;
     const userText = msg.text;
-    
-    // Ignore commands - they're handled separately
-    if (userText && userText.startsWith('/')) {
-      return;
-    }
 
     // Check if the message contains text
     if (!userText) {
-      await botService.sendMessage(chatId, "Sorry, I can only process text messages for now.");
+      await bot.sendMessage(chatId, "Sorry, I can only process text messages for now.");
       return;
     }
 
     // Check if assistantId exists
     if (!openaiService.assistantId) {
-      await botService.sendMessage(chatId, "Bot is still initializing. Please try again in a moment.");
+      await bot.sendMessage(chatId, "Bot is still initializing. Please try again in a moment.");
       return;
     }
 
@@ -53,7 +58,7 @@ export const registerMessageHandler = (bot) => {
         await botService.logUserMessage(chatId, userText);
         
         // In a real implementation, this would forward the message to a human operator
-        await botService.sendMessage(chatId, "Your message has been forwarded to a human operator. They will respond shortly.");
+        await bot.sendMessage(chatId, "Your message has been forwarded to a human operator. They will respond shortly.");
         return;
       }
     } catch (error) {
@@ -64,12 +69,12 @@ export const registerMessageHandler = (bot) => {
     try {
       const hasThread = await botService.hasActiveThread(chatId);
       if (!hasThread) {
-        await botService.sendMessage(chatId, "Please send /start to begin a session.");
+        await bot.sendMessage(chatId, "Please send /start to begin a session.");
         return;
       }
     } catch (error) {
       logger.error('Error checking active thread', error, { chatId });
-      await botService.sendMessage(chatId, "An error occurred. Please try again later.");
+      await bot.sendMessage(chatId, "An error occurred. Please try again later.");
       return;
     }
 
@@ -78,7 +83,7 @@ export const registerMessageHandler = (bot) => {
     try {
       const userThread = await botService.getUserThread(chatId);
       if (!userThread || !userThread.id) {
-        await botService.sendMessage(chatId, "Session error. Please send /start to begin a new session.");
+        await bot.sendMessage(chatId, "Session error. Please send /start to begin a new session.");
         return;
       }
       
@@ -86,13 +91,13 @@ export const registerMessageHandler = (bot) => {
       logger.info(`Retrieved thread ID for chat ${chatId}: ${threadId}`);
     } catch (error) {
       logger.error('Error getting thread ID', error, { chatId });
-      await botService.sendMessage(chatId, "An error occurred. Please try again later.");
+      await bot.sendMessage(chatId, "An error occurred. Please try again later.");
       return;
     }
 
     try {
       // Show typing indicator to the user
-      bot.sendChatAction(chatId, 'typing');
+      await bot.sendChatAction(chatId, 'typing');
       
       // Add the user's message to the thread and log it to the database
       logger.info(`Adding message to thread ${threadId}: ${userText.substring(0, 50)}${userText.length > 50 ? '...' : ''}`);
@@ -105,8 +110,8 @@ export const registerMessageHandler = (bot) => {
         await openaiService.addMessageToThread(threadId, userText);
       });
 
-      // Show typing indicator again before waiting for response (which might take time)
-      bot.sendChatAction(chatId, 'typing');
+      // Show typing indicator again before waiting for response
+      await bot.sendChatAction(chatId, 'typing');
 
       // Create an abort controller for the typing indicator
       const abortController = new AbortController();
@@ -126,12 +131,12 @@ export const registerMessageHandler = (bot) => {
         
         // Send the response to the user
         if (response) {
-          await botService.sendMessage(chatId, response);
+          await bot.sendMessage(chatId, response);
         } else {
           logger.error('Empty response from assistant', new Error('Empty response'), { 
             chatId, threadId 
           });
-          await botService.sendMessage(chatId, "I'm sorry, I couldn't process your request. Please try again.");
+          await bot.sendMessage(chatId, "I'm sorry, I couldn't process your request. Please try again.");
         }
       } catch (error) {
         // Stop typing indicator in case of error
@@ -139,11 +144,14 @@ export const registerMessageHandler = (bot) => {
         if (stopTyping) stopTyping();
         
         logger.error('Error getting response from assistant', error, { chatId, threadId });
-        await botService.sendMessage(chatId, "I'm sorry, I encountered an error processing your message. Please try again.");
+        await bot.sendMessage(chatId, "I'm sorry, I encountered an error processing your message. Please try again.");
       }
     } catch (error) {
       logger.error('Error processing message', error, { chatId });
-      await botService.sendMessage(chatId, "Unable to process your message. Please try again.");
+      await bot.sendMessage(chatId, "Unable to process your message. Please try again.");
     }
   };
+
+  // Start processing the message queue
+  messageQueue.startProcessing();
 };
