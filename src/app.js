@@ -47,54 +47,61 @@ async function initializeBot() {
   }
 }
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  try {
-    await initializeBot();
-    res.status(200).json({ 
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      initialized,
-      assistantId: openaiService.assistantId
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      status: 'error',
-      error: error.message
-    });
-  }
-});
+// Vercel serverless handler
+export default async function handler(req, res) {
+  logger.info('Received request:', { 
+    method: req.method, 
+    path: req.path,
+    body: req.method === 'POST' ? req.body : undefined 
+  });
 
-// Webhook endpoint
-app.post('/webhook', async (req, res) => {
-  try {
-    await initializeBot();
-    
-    const update = req.body;
-    logger.info('Received webhook update', { 
-      update_id: update.update_id,
-      message_id: update.message?.message_id,
-      text: update.message?.text
-    });
-
-    const bot = botService.getBot();
-    if (!bot) {
-      throw new Error('Bot not initialized');
+  // Health check endpoint
+  if (req.method === 'GET' && (req.path === '/health' || req.url === '/health')) {
+    try {
+      await initializeBot();
+      return res.status(200).json({ 
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        initialized,
+        assistantId: openaiService.assistantId
+      });
+    } catch (error) {
+      logger.error('Health check failed:', error);
+      return res.status(500).json({ 
+        status: 'error',
+        error: error.message
+      });
     }
-
-    await bot.handleUpdate(update);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error('Error handling webhook update', error);
-    // Return 200 to prevent Telegram from retrying
-    res.sendStatus(200);
   }
-});
 
-// Handle all other routes
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
+  // Webhook endpoint
+  if (req.method === 'POST' && (req.path === '/webhook' || req.url === '/webhook')) {
+    try {
+      await initializeBot();
+      
+      const update = req.body;
+      logger.info('Processing webhook update:', { 
+        update_id: update.update_id,
+        message_id: update.message?.message_id,
+        text: update.message?.text,
+        chat_id: update.message?.chat?.id
+      });
 
-// Export for Vercel
-export default app;
+      const bot = botService.getBot();
+      if (!bot) {
+        throw new Error('Bot not initialized');
+      }
+
+      await bot.handleUpdate(update);
+      return res.sendStatus(200);
+    } catch (error) {
+      logger.error('Webhook processing failed:', error);
+      // Return 200 to prevent Telegram from retrying
+      return res.sendStatus(200);
+    }
+  }
+
+  // Handle all other routes
+  logger.info('Route not found:', req.path);
+  return res.status(404).json({ error: 'Not found' });
+}
