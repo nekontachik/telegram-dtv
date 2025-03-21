@@ -17,29 +17,43 @@ class BotService {
 
   /**
    * Initialize the Telegram bot
+   * @param {Object} options - Initialization options
+   * @param {string} options.mode - Either 'development' or 'production'
    * @returns {TelegramBot} - The initialized bot instance
    * @throws {Error} - If initialization fails
    */
-  async init() {
+  async init({ mode = 'development' } = {}) {
     try {
       if (this.bot) {
         logger.info('Bot already initialized');
         return this.bot;
       }
 
-      logger.info('Initializing Telegram bot in webhook mode');
+      logger.info(`Initializing Telegram bot in ${mode} mode`);
 
-      // Initialize bot with webhook configuration
-      this.bot = new TelegramBot(config.telegram.token, {
+      // Initialize bot with appropriate configuration
+      const options = mode === 'development' ? {
+        polling: {
+          interval: 300,
+          autoStart: true
+        }
+      } : {
         webHook: true
-      });
+      };
+
+      this.bot = new TelegramBot(config.telegram.token, options);
 
       // Register message and command handlers
       logger.info('Registering message and command handlers');
       await registerMessageHandler(this.bot);
       await registerCommandHandlers(this.bot);
 
-      logger.info('Bot initialization complete');
+      if (mode === 'development') {
+        logger.info('Starting polling in development mode');
+        await this.bot.startPolling();
+      }
+
+      logger.info(`Bot initialization complete in ${mode} mode`);
       return this.bot;
     } catch (error) {
       logger.error('Failed to initialize Telegram bot', error);
