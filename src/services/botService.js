@@ -11,7 +11,8 @@ import { SessionCache } from '../utils/cache.js';
 import { retryOperation } from '../utils/cache.js';
 import { instanceManager } from '../utils/instanceManager.js';
 import { messageQueue } from '../utils/messageQueue.js';
-import { registerMessageHandler, registerCommandHandlers } from '../utils/messageHandler.js';
+import { registerMessageHandler } from '../handlers/messageHandler.js';
+import { registerCommandHandlers } from '../handlers/commandHandler.js';
 
 class BotService {
   constructor() {
@@ -61,8 +62,8 @@ class BotService {
       this.bot = new TelegramBot(config.telegram.token, options);
       
       // Register message and command handlers
-      registerMessageHandler(this.bot);
-      registerCommandHandlers(this.bot);
+      await registerMessageHandler(this.bot);
+      await registerCommandHandlers(this.bot);
 
       if (process.env.VERCEL) {
         // Set webhook for Vercel deployment
