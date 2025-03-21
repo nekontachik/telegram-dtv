@@ -8,8 +8,10 @@ import { BotService } from '../services/botService.js';
 import { UserSessionService } from '../services/UserSessionService.js';
 import { WebhookController } from '../controllers/WebhookController.js';
 import { openaiService } from '../services/openaiService.js';
+import { dbService } from '../services/dbService.js';
 import { logger } from '../utils/logger.js';
 import { RedisStorage } from '../storage/RedisStorage.js';
+import { MemoryStorage } from '../storage/MemoryStorage.js';
 
 class ProductionServer {
   constructor() {
@@ -17,6 +19,7 @@ class ProductionServer {
     this.botService = null;
     this.webhookController = null;
     this.storage = null;
+    this.userSessionService = null;
     this.isShuttingDown = false;
   }
 
@@ -65,11 +68,17 @@ class ProductionServer {
       config.validate();
       
       // Initialize storage
-      this.storage = new RedisStorage(config.redis);
+      this.storage = config.redis 
+        ? new RedisStorage(config.redis)
+        : new MemoryStorage();
       
-      // Initialize services
-      const userSessionService = new UserSessionService(this.storage);
-      this.botService = new BotService(userSessionService);
+      // Initialize database if configured
+      if (config.supabase.enabled) {
+        dbService.init(config.supabase.url, config.supabase.key);
+        if (!dbService.isInitialized()) {
+          throw new Error('Failed to initialize database');
+        }
+      }
       
       // Initialize OpenAI
       const isValidKey = await openaiService.validateApiKey();
@@ -77,6 +86,12 @@ class ProductionServer {
         throw new Error("Invalid OpenAI API key");
       }
       await openaiService.createOrGetAssistant();
+
+      // Initialize user session service
+      this.userSessionService = new UserSessionService(this.storage);
+      
+      // Initialize bot service with user session service
+      this.botService = new BotService(this.userSessionService);
       
       // Initialize bot with webhook
       await this.botService.init({ 
@@ -103,8 +118,10 @@ class ProductionServer {
       res.json({ 
         status: this.isShuttingDown ? 'shutting_down' : 'ok',
         ...this.server.getStatus(),
-        redis: this.storage ? 'connected' : 'disconnected',
-        bot: this.botService?.getBot() ? 'initialized' : 'not_initialized'
+        storage: config.redis ? 'redis' : 'memory',
+        database: config.supabase.enabled ? 'connected' : 'disabled',
+        bot: this.botService?.getBot() ? 'initialized' : 'not_initialized',
+        userSessions: this.userSessionService ? 'initialized' : 'not_initialized'
       });
     });
 
@@ -135,6 +152,11 @@ class ProductionServer {
       // Cleanup bot resources
       if (this.botService?.getBot()) {
         await this.botService.getBot().deleteWebHook();
+      }
+
+      // Close Redis connection if using Redis
+      if (this.storage?.quit) {
+        await this.storage.quit();
       }
 
       logger.info('Graceful shutdown completed');
