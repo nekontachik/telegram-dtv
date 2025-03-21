@@ -22,6 +22,14 @@ const execAsync = promisify(exec);
 const app = express();
 app.use(express.json());
 
+// Add CORS headers
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
+
 // Глобальна обробка необроблених помилок
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught exception', error, { persistent: true });
@@ -81,6 +89,15 @@ async function checkForRunningBots() {
     logger.warn(`Error checking for bot processes: ${error.message}`);
   }
 }
+
+// Health check endpoint - no auth required
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV
+  });
+});
 
 /**
  * Initialize the application
@@ -145,19 +162,6 @@ async function init() {
       }
     });
 
-    // Health check endpoint
-    app.get('/health', (req, res) => {
-      res.status(200).json({ 
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        initialized: initialized,
-        bot_info: {
-          username: bot.botInfo?.username,
-          webhook_set: true
-        }
-      });
-    });
-
     // In development, check for conflicting processes
     await checkForRunningBots();
     
@@ -175,6 +179,15 @@ let initialized = false;
 let cachedApp = null;
 
 export default async function handler(req, res) {
+  // Health check endpoint - no initialization required
+  if (req.method === 'GET' && req.url === '/health') {
+    return res.status(200).json({ 
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      env: process.env.NODE_ENV
+    });
+  }
+
   if (!initialized) {
     try {
       cachedApp = await init();
